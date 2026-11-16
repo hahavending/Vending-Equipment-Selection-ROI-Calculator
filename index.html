@@ -610,6 +610,107 @@
     color: #f8fafc;
   }
   .pay-schedule-row.pay-sum.grand { color: #34d399; font-size: 10.5px; }
+
+  /* ===== v6.3: Bi-directional Gross Monthly Revenue Control ===== */
+  .rev-override-box {
+    background: #f0f9ff;
+    border: 1.5px solid #93c5fd;
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 12px;
+  }
+  .rev-override-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+  .rev-override-header label {
+    margin-bottom: 0;
+    color: #1e40af;
+    font-size: 11.5px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .rev-mode-badge {
+    font-family: var(--mono);
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  .rev-mode-badge.auto {
+    background: #dbeafe;
+    color: #1d4ed8;
+  }
+  .rev-mode-badge.manual {
+    background: #fef3c7;
+    color: #b45309;
+    border: 1px solid #fde68a;
+  }
+  .rev-input-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .rev-input-wrap {
+    position: relative;
+    flex: 1;
+  }
+  .rev-input-wrap span.prefix {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-family: var(--mono);
+    font-weight: 700;
+    color: #1e40af;
+    font-size: 13px;
+  }
+  #grossMonthlyRevInput {
+    padding-left: 22px;
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+    color: #1e3a8a;
+    border-color: #60a5fa;
+    background: #ffffff;
+  }
+  #grossMonthlyRevInput.is-manual {
+    background: #fffbeb;
+    border-color: #f59e0b;
+    color: #92400e;
+  }
+  .btn-rev-sync {
+    background: #e2e8f0;
+    border: 1px solid #cbd5e1;
+    color: #334155;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 7px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn-rev-sync:hover {
+    background: #cbd5e1;
+    color: #0f172a;
+  }
+  .rev-sync-note {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: #475569;
+    margin-top: 5px;
+    line-height: 1.35;
+  }
+  .traffic-dimmed input {
+    background: #f8fafc;
+    color: #64748b;
+  }
 </style>
 </head>
 <body>
@@ -701,7 +802,25 @@
             </select>
           </div>
 
-          <div class="row3">
+          <!-- GROSS MONTHLY REVENUE BI-DIRECTIONAL INPUT -->
+          <div class="rev-override-box">
+            <div class="rev-override-header">
+              <label>
+                <span>Gross Monthly Revenue ($/Site/Mo)</span>
+              </label>
+              <span class="rev-mode-badge auto" id="revModeBadge">Auto from Traffic</span>
+            </div>
+            <div class="rev-input-row">
+              <div class="rev-input-wrap">
+                <span class="prefix">$</span>
+                <input type="number" id="grossMonthlyRevInput" step="50" min="0" oninput="onGrossRevenueManualInput(this.value)">
+              </div>
+              <button type="button" class="btn-rev-sync" id="btnResetRevAuto" onclick="resetGrossRevenueToAuto()" style="display:none;" title="Recalculate from Foot Traffic × Exposure × Conversion">↺ Sync Traffic</button>
+            </div>
+            <div class="rev-sync-note" id="revSyncNote">Auto-calculated from traffic funnel below. Enter target monthly sales directly to override.</div>
+          </div>
+
+          <div class="row3" id="trafficFunnelRow">
             <div>
               <label>Foot Traffic/Day</label>
               <input type="number" id="headcount" value="120" oninput="updateActiveParam('headcount', this.value)">
@@ -1256,6 +1375,7 @@ function loadActiveConfigToForm() {
   const siteName = currentMode === 'single' ? 'Single Site' : `Site #${activeSiteIndex + 1} (${presets[fleetPortfolio[activeSiteIndex].type].label.split(' (')[0]})`;
   document.getElementById('lblActiveSiteNotice').innerText = `Editing: ${siteName}`;
 
+  syncGrossRevenueInputUI();
   updateFreezerCountDropdownOptions();
   renderDevicePriceInputs();
 }
@@ -1268,12 +1388,109 @@ function updateActiveParam(key, val) {
     cfg[key] = +val || 0;
   }
 
-  if (key === 'headcount' || key === 'footTraffic' || key === 'conversion' || key === 'restockDays' || key === 'basket' || key === 'freezerCount') {
+  // If user edits any traffic funnel or pricing/days driver, switch back to auto-calculated Gross Monthly Revenue
+  if (['headcount', 'footTraffic', 'conversion', 'serviceDays', 'basket', 'itemPrice'].includes(key)) {
+    cfg.manualGrossRevenue = null;
+    syncGrossRevenueInputUI();
+  }
+
+  if (['headcount', 'footTraffic', 'conversion', 'serviceDays', 'basket', 'itemPrice', 'restockDays', 'freezerCount'].includes(key)) {
     updateFreezerCountDropdownOptions();
     renderDevicePriceInputs();
   }
 
   render();
+}
+
+function getEffectiveDemandMetrics(cfg) {
+  const serviceDays = cfg.serviceDays > 0 ? cfg.serviceDays : 30;
+  const basket = cfg.basket > 0 ? cfg.basket : 1;
+  const itemPrice = cfg.itemPrice > 0 ? cfg.itemPrice : 3.0;
+  const avgOrderVal = basket * itemPrice;
+
+  if (cfg.manualGrossRevenue !== null && cfg.manualGrossRevenue !== undefined && cfg.manualGrossRevenue >= 0) {
+    const monthlyRevenue = cfg.manualGrossRevenue;
+    const monthlyItemsSold = itemPrice > 0 ? (monthlyRevenue / itemPrice) : 0;
+    const monthlyOrders = avgOrderVal > 0 ? (monthlyRevenue / avgOrderVal) : 0;
+    const dailyOrders = monthlyOrders / serviceDays;
+    const dailyItemsSold = monthlyItemsSold / serviceDays;
+    return {
+      isManualRev: true,
+      monthlyRevenue,
+      monthlyOrders,
+      dailyOrders,
+      dailyItemsSold
+    };
+  } else {
+    const dailyOrders = cfg.headcount * (cfg.footTraffic / 100) * (cfg.conversion / 100);
+    const dailyItemsSold = dailyOrders * basket;
+    const monthlyOrders = dailyOrders * serviceDays;
+    const monthlyRevenue = monthlyOrders * avgOrderVal;
+    return {
+      isManualRev: false,
+      monthlyRevenue,
+      monthlyOrders,
+      dailyOrders,
+      dailyItemsSold
+    };
+  }
+}
+
+function onGrossRevenueManualInput(val) {
+  const cfg = currentMode === 'single' ? singleSiteConfig : fleetPortfolio[activeSiteIndex].config;
+  if (val === '' || val === null) {
+    cfg.manualGrossRevenue = null;
+  } else {
+    cfg.manualGrossRevenue = Math.max(0, +val || 0);
+  }
+  syncGrossRevenueInputUI(true);
+  updateFreezerCountDropdownOptions();
+  renderDevicePriceInputs();
+  render();
+}
+
+function resetGrossRevenueToAuto() {
+  const cfg = currentMode === 'single' ? singleSiteConfig : fleetPortfolio[activeSiteIndex].config;
+  cfg.manualGrossRevenue = null;
+  syncGrossRevenueInputUI();
+  updateFreezerCountDropdownOptions();
+  renderDevicePriceInputs();
+  render();
+}
+
+function syncGrossRevenueInputUI(skipInputOverwrite = false) {
+  const cfg = currentMode === 'single' ? singleSiteConfig : fleetPortfolio[activeSiteIndex].config;
+  const inputEl = document.getElementById('grossMonthlyRevInput');
+  const badgeEl = document.getElementById('revModeBadge');
+  const btnReset = document.getElementById('btnResetRevAuto');
+  const noteEl = document.getElementById('revSyncNote');
+  const trafficRow = document.getElementById('trafficFunnelRow');
+  if (!inputEl) return;
+
+  const demand = getEffectiveDemandMetrics(cfg);
+  if (!skipInputOverwrite) {
+    inputEl.value = Math.round(demand.monthlyRevenue * 100) / 100;
+  }
+
+  if (demand.isManualRev) {
+    inputEl.classList.add('is-manual');
+    badgeEl.className = 'rev-mode-badge manual';
+    badgeEl.innerText = 'Manual Override';
+    btnReset.style.display = 'inline-block';
+    if (trafficRow) trafficRow.classList.add('traffic-dimmed');
+    const impliedDailyBuyers = demand.dailyOrders;
+    const impliedConv = (cfg.headcount > 0 && cfg.footTraffic > 0)
+      ? (impliedDailyBuyers / (cfg.headcount * (cfg.footTraffic / 100)) * 100)
+      : 0;
+    noteEl.innerText = `Direct target active → implies ~${fmt(demand.dailyItemsSold, 1)} items/day (${fmt(impliedDailyBuyers, 1)} txns/day, ~${fmt(impliedConv, 1)}% conv. at current traffic).`;
+  } else {
+    inputEl.classList.remove('is-manual');
+    badgeEl.className = 'rev-mode-badge auto';
+    badgeEl.innerText = 'Auto from Traffic';
+    btnReset.style.display = 'none';
+    if (trafficRow) trafficRow.classList.remove('traffic-dimmed');
+    noteEl.innerText = 'Auto-calculated from Foot Traffic × Exposure × Conversion × Days × Basket × Price. Edit directly to override.';
+  }
 }
 
 function updateDevicePriceParam(deviceName, val) {
@@ -1312,9 +1529,9 @@ function updateFreezerCountDropdownOptions() {
   const basket = cfg.basket;
   const restockDays = cfg.restockDays;
 
-  // Calculate Min Safety Cap precisely
-  const dailyOrders = headcount * footTraffic * conversion;
-  const dailyItemsSold = dailyOrders * basket;
+  // Calculate Min Safety Cap precisely (supports both auto traffic & manual revenue)
+  const demand = getEffectiveDemandMetrics(cfg);
+  const dailyItemsSold = demand.dailyItemsSold;
   const cycleItemsSold = dailyItemsSold * restockDays;
   const minCap = cycleItemsSold / 0.8;
 
@@ -1599,10 +1816,11 @@ function calculateSitePL(cfg, inputUnitsCount = 1, scaleDiscountLabor = 0, scale
   const maintReserve = cfg.maintReserve;
   const shippingFee = cfg.shippingFee;
 
-  const dailyOrders = headcount * footTraffic * conversion;
-  const dailyItemsSold = dailyOrders * basket;
+  const demand = getEffectiveDemandMetrics(cfg);
+  const dailyOrders = demand.dailyOrders;
+  const dailyItemsSold = demand.dailyItemsSold;
   const cycleItemsSold = dailyItemsSold * restockDays;
-  const monthlyOrders = dailyOrders * serviceDays;
+  const monthlyOrders = demand.monthlyOrders;
 
   const minCap = cycleItemsSold / 0.8;
 
@@ -1658,7 +1876,7 @@ function calculateSitePL(cfg, inputUnitsCount = 1, scaleDiscountLabor = 0, scale
     monthlyPayment = stdPayment;
   }
 
-  const monthlyRevenue = monthlyOrders * basket * itemPrice * (inputUnitsCount === 1 ? 1 : inputUnitsCount);
+  const monthlyRevenue = demand.monthlyRevenue * (inputUnitsCount === 1 ? 1 : inputUnitsCount);
   const costCOGS = monthlyRevenue * cogsRate;
   const costWastage = costCOGS * wastageRate;
   const trips = restockDays > 0 ? (serviceDays / restockDays) : 0;
@@ -1903,7 +2121,7 @@ function render() {
   }
 
   const pnlItems = [
-    { label: "Gross Monthly Revenue", val: aggRevenue, desc: "Total monthly sales generated by foot traffic, conversion, basket size, and item price.", formula: "Headcount × Exposure % × Conversion % × Operating Days × Basket × Price" },
+    { label: "Gross Monthly Revenue", val: aggRevenue, desc: activeCfg.manualGrossRevenue != null ? "Directly entered monthly gross sales target per site (automatically drives inventory demand, equipment sizing, COGS, fees, and ROI)." : "Total monthly sales generated by foot traffic, conversion, basket size, and item price.", formula: activeCfg.manualGrossRevenue != null ? "Manual Gross Monthly Revenue ($/Site/Mo) × Sites" : "Headcount × Exposure % × Conversion % × Operating Days × Basket × Price" },
     { label: "— Cost of Goods Sold (COGS)", val: -aggCOGS, desc: "Direct wholesale purchase cost of merchandise sold to customers.", formula: "Gross Monthly Revenue × COGS Rate %" },
     { label: "— Spoilage & Wastage Loss", val: -aggWastage, desc: "Financial reserve for expired goods, damaged items, or inventory shrinkage.", formula: "COGS × Wastage Rate %" },
     { label: "— Restock Labor & Route Fuel", val: -aggRestockTrip, desc: "One route stop restocks every machine at a site, so labour + fuel is charged per SITE visit (not per machine) and multiplied by the number of sites.", formula: "(Operating Days ÷ Restock Days) × Restock Labor ($/Trip per Site) × Sites" },
@@ -2100,7 +2318,8 @@ function renderDevicePriceInputs() {
   const conversion = cfg.conversion / 100;
   const restockDays = cfg.restockDays;
 
-  const dailyItemsSold = headcount * footTraffic * conversion * cfg.basket;
+  const demand = getEffectiveDemandMetrics(cfg);
+  const dailyItemsSold = demand.dailyItemsSold;
   const minCap = (dailyItemsSold * restockDays) / 0.8;
   const siteDevices = getOptimalDeviceCombinationRaw(minCap, cfg.freezerCount || 0);
 
